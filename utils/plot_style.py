@@ -1,7 +1,5 @@
 import matplotlib.pyplot as plt
-
-# 设置全局字体为 Times New Roman
-plt.rcParams['font.family'] = 'Times New Roman'
+plt.rcParams['font.family'] = 'serif'  # 使用系统默认衬线字体
 plt.rcParams['mathtext.fontset'] = 'stix'
 
 # 扩展配色方案：每个调色板包含10种颜色（用于多模型区分）
