@@ -1,29 +1,49 @@
+import streamlit as st
+
+# 页面配置必须放在最前面
+st.set_page_config(page_title="临床多组学自动化分析平台", layout="wide")
+
+# 检查密码（如果设置了 secrets）
 def check_password():
     """返回 True 表示用户输入了正确的密码。"""
+    # 确保 session_state 中有了密码状态
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
 
+    # 如果已通过验证，直接返回 True
     if st.session_state.password_correct:
         return True
 
+    # 检查是否设置了 ACCESS_PASSWORD
+    try:
+        correct_password = st.secrets["ACCESS_PASSWORD"]
+    except (KeyError, AttributeError):
+        # 如果未设置密码，允许直接访问（或显示警告）
+        st.warning("系统未设置访问密码，请管理员在 Secrets 中添加 ACCESS_PASSWORD。")
+        # 允许访问（可选），或阻止：
+        # return False
+        return True  # 临时允许访问，实际使用时建议改为 False
+
     # 显示密码输入框
-    password = st.text_input("请输入访问密码", type="password")
+    st.markdown("## 🔐 请输入访问密码")
+    password = st.text_input("密码", type="password", placeholder="请输入密码")
     if st.button("登录"):
-        # 从 secrets 中读取正确密码进行比较
-        if password == st.secrets["ACCESS_PASSWORD"]:
+        if password == correct_password:
             st.session_state.password_correct = True
             st.rerun()
         else:
             st.error("😕 密码错误，请重试。")
     return False
 
-# 如果密码验证失败，则停止执行后续代码
+# 执行密码验证，如果未通过则停止后续执行
 if not check_password():
     st.stop()
 
+# ---------- 以下是您的原有应用代码（从全局状态初始化开始） ----------
+
+
 # ---------- 以下是您原有的应用代码 ----------
 # st.title("🔬 临床数据智能分析与机器学习平台")
-import streamlit as st
 import streamlit as st
 import pandas as pd
 import numpy as np
