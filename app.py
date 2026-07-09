@@ -1,4 +1,32 @@
 import streamlit as st
+
+def check_password():
+    """返回 True 表示用户输入了正确的密码。"""
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+
+    if st.session_state.password_correct:
+        return True
+
+    # 显示密码输入框
+    password = st.text_input("请输入访问密码", type="password")
+    if st.button("登录"):
+        # 从 secrets 中读取正确密码进行比较
+        if password == st.secrets["ACCESS_PASSWORD"]:
+            st.session_state.password_correct = True
+            st.rerun()
+        else:
+            st.error("😕 密码错误，请重试。")
+    return False
+
+# 如果密码验证失败，则停止执行后续代码
+if not check_password():
+    st.stop()
+
+# ---------- 以下是您原有的应用代码 ----------
+# st.title("🔬 临床数据智能分析与机器学习平台")
+# ... 您的所有原有代码 ...密码我想设置为123456789
+import streamlit as st
 import pandas as pd
 import numpy as np
 import re
