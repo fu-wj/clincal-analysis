@@ -1,5 +1,3 @@
-import streamlit as st
-
 def check_password():
     """返回 True 表示用户输入了正确的密码。"""
     if "password_correct" not in st.session_state:
@@ -25,7 +23,7 @@ if not check_password():
 
 # ---------- 以下是您原有的应用代码 ----------
 # st.title("🔬 临床数据智能分析与机器学习平台")
-# ... 您的所有原有代码 ...密码我想设置为123456789
+import streamlit as st
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -106,12 +104,97 @@ def store_string(text, filename):
 
 # ========== 国风 UI ==========
 st.markdown("""
-    <style>
-    .stApp { background-color: #fdfbf7; }
-    h1, h2, h3 { color: #4a4266; font-family: "Microsoft YaHei", sans-serif; }
-    .stButton>button { background-color: #ff461f; color: white; border-radius: 5px; border: none; }
-    .stButton>button:hover { background-color: #c3270b; }
-    </style>
+<style>
+/* 全局背景与字体 */
+.stApp {
+    background-color: #f5f0e8;
+    background-image: 
+        url("data:image/svg+xml,%3Csvg width='100' height='100' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100' height='100' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E"),
+        radial-gradient(ellipse at 20% 50%, rgba(200, 180, 150, 0.08) 0%, transparent 70%),
+        radial-gradient(ellipse at 80% 50%, rgba(180, 160, 130, 0.06) 0%, transparent 70%);
+    font-family: "STKaiti", "KaiTi", "楷体", "华文楷体", "SimSun", "宋体", serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: "STKaiti", "KaiTi", "楷体", "华文楷体", serif;
+    color: #3d2b1a;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.05);
+    border-bottom: 2px solid #b89b7b;
+    padding-bottom: 0.3em;
+    margin-top: 0.5em;
+    letter-spacing: 2px;
+}
+
+h1 {
+    font-size: 2.8em;
+    letter-spacing: 6px;
+    color: #8b1a1a;
+    text-shadow: 0 0 10px rgba(139, 26, 26, 0.12);
+    border-bottom: 3px solid #8b1a1a;
+    display: inline-block;
+    padding-bottom: 0.2em;
+}
+
+/* 侧边栏 */
+.css-1d391kg, .sidebar-content {
+    background-color: #f0e8db;
+    background-image: linear-gradient(180deg, rgba(200, 180, 160, 0.1) 0%, transparent 100%);
+    border-right: 3px solid #b89b7b;
+    box-shadow: inset -10px 0 20px rgba(0,0,0,0.03);
+}
+
+/* 按钮 */
+.stButton>button {
+    background-color: #8b1a1a;
+    color: #f5f0e8;
+    border: 1px solid #6b3a2a;
+    border-radius: 4px;
+    padding: 0.5em 2em;
+    font-family: "STKaiti", "KaiTi", "楷体", serif;
+    font-size: 1.1em;
+    letter-spacing: 2px;
+    transition: all 0.3s;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+.stButton>button:hover {
+    background-color: #a52a2a;
+    box-shadow: 0 6px 12px rgba(139, 26, 26, 0.3);
+    transform: translateY(-2px);
+}
+.stButton>button:active {
+    transform: translateY(1px);
+}
+
+/* 表格 */
+.dataframe th {
+    background-color: #d4c5b2;
+    color: #3d2b1a;
+    border: 1px solid #b89b7b;
+}
+.dataframe td {
+    border: 1px solid #d4c5b2;
+}
+
+/* 标签页 */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #e8ddd0;
+    border-radius: 6px 6px 0 0;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    background-color: #8b1a1a;
+    color: #f5f0e8;
+}
+.stTabs [data-baseweb="tab-panel"] {
+    background-color: rgba(255, 248, 235, 0.5);
+    border: 1px solid #cbb5a0;
+}
+
+/* 进度条 */
+.stProgress > div > div {
+    background-color: #8b1a1a;
+    background-image: linear-gradient(90deg, #8b1a1a, #c0392b);
+}
+</style>
 """, unsafe_allow_html=True)
 
 st.title("🔬 临床数据智能分析与机器学习平台")
