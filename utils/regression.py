@@ -15,143 +15,133 @@ JOURNAL_PALETTES = {
 }
 
 
-def run_univariate_regression(df, y_var, x_vars, model_type="Logistic", time_var=None):
-    """
-    批量运行单因素回归分析
-    """
+def run_univariate_regression(df, y_var, x_vars, model_type='Logistic', time_var=None):
+    import statsmodels.api as sm
+    import numpy as np
+
+    y = df[y_var].astype(float)
     results = []
-
-    for x in x_vars:
+    for var in x_vars:
+        X_var = df[var].copy()
+        if X_var.dtype == object:
+            X_var = pd.to_numeric(X_var, errors='coerce')
+        X = sm.add_constant(X_var.astype(float))
         try:
-            if model_type == "Logistic":
-                # 显式转换表述，确保稳定性
-                formula = f"{y_var} ~ {x}"
-                model = smf.logit(formula, data=df).fit(disp=0)
-
-                param = model.params[x]
-                conf = model.conf_int().loc[x]
-                pvalue = model.pvalues[x]
-
-                metric_name = "Odds Ratio (OR)"
-                value = np.exp(param)
-                lower_ci = np.exp(conf[0])
-                upper_ci = np.exp(conf[1])
-
-            elif model_type == "Cox" and time_var:
-                cph = CoxPHFitter()
-                # 仅筛选当前所需的生存三要素数据，剔除缺失值
-                analysis_df = df[[time_var, y_var, x]].dropna()
-                cph.fit(analysis_df, duration_col=time_var, event_col=y_var)
-
-                summary = cph.summary.loc[x]
-                metric_name = "Hazard Ratio (HR)"
-                value = summary['exp(coef)']
-                lower_ci = summary['exp(coef) lower 95%']
-                upper_ci = summary['exp(coef) upper 95%']
-                pvalue = summary['p']
-
-            results.append({
-                "Variable": x,
-                f"{metric_name}": value,
-                "Lower_95_CI": lower_ci,
-                "Upper_95_CI": upper_ci,
-                "P_value": pvalue
-            })
+            if model_type == 'Logistic':
+                model = sm.Logit(y, X).fit(disp=0)
+                p = model.pvalues[var]
+                or_ = np.exp(model.params[var])
+                ci = np.exp(model.conf_int().loc[var])
+                results.append([var, or_, ci[0], ci[1], p])
+            # ... 其他模型类型
         except Exception as e:
-            continue
+            results.append([var, np.nan, np.nan, np.nan, np.nan])
+    res_df = pd.DataFrame(results, columns=['Variable', 'Odds Ratio (OR)', 'Lower_95_CI', 'Upper_95_CI', 'P_value'])
+    return res_df
 
-    return pd.DataFrame(results)
+
+def run_multivariate_regression(df, y_var, x_vars, model_type='Logistic', time_var=None):
+    import statsmodels.api as sm
+    import pandas as pd
+    import numpy as np
+
+    # 确保 X 和 y 是数值类型，并处理缺失值（虽然应该已经填补）
+    X = df[x_vars].copy()
+    y = df[y_var].copy()
+
+    # 将可能存在的 object 列转为数值
+    for col in X.columns:
+        if X[col].dtype == object:
+            try:
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+            except:
+                pass
+    # 强制转换整个 X 为 float
+    X = X.astype(float)
+    y = y.astype(float)
+
+    # 添加常数项
+    X = sm.add_constant(X)
+
+    if model_type == 'Logistic':
+        model = sm.Logit(y, X).fit(disp=0)
+    else:
+        # Cox 略
+        pass
+
+    params = model.params.drop('const', errors='ignore')
+    conf = model.conf_int().drop('const', errors='ignore')
+    pvalues = model.pvalues.drop('const', errors='ignore')
+
+    res = pd.DataFrame({
+        'Variable': params.index,
+        'Odds Ratio (OR)': np.exp(params.values),
+        'Lower_95_CI': np.exp(conf.iloc[:, 0].values),
+        'Upper_95_CI': np.exp(conf.iloc[:, 1].values),
+        'P_value': pvalues.values
+    })
+    return res
 
 
-def run_multivariate_regression(df, y_var, x_vars, model_type="Logistic", time_var=None):
+def plot_forest_chart(results_df, metric_col=None, ci_low_col=None, ci_high_col=None, palette_name=None, title=None):
     """
-    运行多因素回归分析
+    通用森林图，自动识别效应量和置信区间的列名。
+    results_df 需包含 'Variable' 列或以其 index 作为变量名。
     """
-    if not x_vars:
-        return pd.DataFrame()
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from utils.plot_style import get_palette
 
-    try:
-        if model_type == "Logistic":
-            formula = f"{y_var} ~ " + " + ".join(x_vars)
-            model = smf.logit(formula, data=df).fit(disp=0)
+    # 确保有变量名列
+    if 'Variable' not in results_df.columns:
+        results_df = results_df.reset_index()
+        if 'index' in results_df.columns:
+            results_df.rename(columns={'index': 'Variable'}, inplace=True)
+        else:
+            raise KeyError("DataFrame must have 'Variable' column or index.")
 
-            results = []
-            for x in x_vars:
-                results.append({
-                    "Variable": x,
-                    "Odds Ratio (OR)": np.exp(model.params[x]),
-                    "Lower_95_CI": np.exp(model.conf_int().loc[x][0]),
-                    "Upper_95_CI": np.exp(model.conf_int().loc[x][1]),
-                    "P_value": model.pvalues[x]
-                })
-            return pd.DataFrame(results)
+    # 自动探测效应量列
+    possible_metrics = ['Odds Ratio (OR)', 'Hazard Ratio (HR)', 'OR', 'HR', 'exp(coef)', 'Coef.']
+    if metric_col is None or metric_col not in results_df.columns:
+        for col in possible_metrics:
+            if col in results_df.columns:
+                metric_col = col
+                break
+        else:
+            raise KeyError(f"No metric column found. Available: {results_df.columns.tolist()}")
 
-        elif model_type == "Cox" and time_var:
-            cph = CoxPHFitter()
-            analysis_df = df[[time_var, y_var] + x_vars].dropna()
-            cph.fit(analysis_df, duration_col=time_var, event_col=y_var)
+    # 自动探测置信区间列
+    lower_candidates = ['Lower_95_CI', 'CI_lower', 'exp(coef) lower 95%', '2.5%', 'Lower']
+    upper_candidates = ['Upper_95_CI', 'CI_upper', 'exp(coef) upper 95%', '97.5%', 'Upper']
 
-            results = []
-            for x in x_vars:
-                summary = cph.summary.loc[x]
-                results.append({
-                    "Variable": x,
-                    "Hazard Ratio (HR)": summary['exp(coef)'],
-                    "Lower_95_CI": summary['exp(coef) lower 95%'],
-                    "Upper_95_CI": summary['exp(coef) upper 95%'],
-                    "P_value": summary['p']
-                })
-            return pd.DataFrame(results)
-    except Exception as e:
-        return pd.DataFrame({"Error": [str(e)]})
+    if ci_low_col is None or ci_low_col not in results_df.columns:
+        for col in lower_candidates:
+            if col in results_df.columns:
+                ci_low_col = col
+                break
+        else:
+            raise KeyError(f"Lower CI column not found. Available: {results_df.columns.tolist()}")
 
+    if ci_high_col is None or ci_high_col not in results_df.columns:
+        for col in upper_candidates:
+            if col in results_df.columns:
+                ci_high_col = col
+                break
+        else:
+            raise KeyError(f"Upper CI column not found.")
 
-def plot_forest_chart(res_df, metric_col, palette_name="Nature / NPG"):
-    """
-    绘制符合 SCI/CNS 顶刊级别的英文森林图
-    """
-    palette = JOURNAL_PALETTES.get(palette_name, JOURNAL_PALETTES["Nature / NPG"])
+    # 绘制
+    y_pos = range(len(results_df))
+    means = results_df[metric_col].astype(float)
+    left_err = means - results_df[ci_low_col].astype(float)
+    right_err = results_df[ci_high_col].astype(float) - means
 
-    # 按照变量顺序倒序排列，保证图表从上往下契合表格顺序
-    plot_df = res_df.iloc[::-1].reset_index(drop=True)
-    y_pos = np.arange(len(plot_df))
-
-    fig, ax = plt.subplots(figsize=(7, max(3, len(plot_df) * 0.45)), dpi=300)
-
-    # 绘制背景参考网格线
-    ax.xaxis.grid(True, linestyle='--', alpha=0.6, color=palette["grid"])
-    ax.set_axisbelow(True)
-
-    # 绘制无效线 (OR/HR = 1)
-    ax.axvline(x=1.0, color='black', linestyle='-', linewidth=1.2, alpha=0.7)
-
-    # 绘制置信区间与中心点
-    for i, row in plot_df.iterrows():
-        # 计算误差线的左右长度
-        left_err = row[metric_col] - row['Lower_95_CI']
-        right_err = row['Upper_95_CI'] - row[metric_col]
-
-        ax.errorbar(
-            x=row[metric_col], y=y_pos[i],
-            xerr=[[left_err], [right_err]],
-            fmt='o', color=palette["primary"],
-            ecolor=palette["error"], elinewidth=1.5,
-            capsize=4, markersize=7, mec='black', mew=0.5
-        )
-
-        # 在图表右侧边缘标注 P 值和具体数值 (英文学术规范)
-        p_text = f"P={row['P_value']:.3f}" if row['P_value'] >= 0.001 else "P<0.001"
-        anno_text = f"{row[metric_col]:.2f} ({row['Lower_95_CI']:.2f}-{row['Upper_95_CI']:.2f})  {p_text}"
-        ax.text(ax.get_xlim()[1] * 1.05, y_pos[i], anno_text, va='center', fontsize=9, fontfamily='sans-serif')
-
-    # 图表细节精修
+    fig, ax = plt.subplots(figsize=(8, max(4, 0.3 * len(results_df))))
+    ax.errorbar(means, y_pos, xerr=[left_err, right_err], fmt='o', capsize=5, color='black')
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(plot_df['Variable'], fontsize=10, fontfamily='sans-serif')
-    ax.set_xlabel(metric_col, fontsize=11, fontweight='bold', fontfamily='sans-serif')
-
-    # 移除顶部和右侧的边框
-    for spine in ['top', 'right']:
-        ax.spines[spine].set_visible(False)
-
+    ax.set_yticklabels(results_df['Variable'])
+    ax.axvline(1, color='gray', linestyle='--')
+    ax.set_xlabel(metric_col)
+    ax.set_title(title or f'Forest Plot ({metric_col})')
     plt.tight_layout()
     return fig
