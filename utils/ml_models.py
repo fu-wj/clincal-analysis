@@ -173,7 +173,7 @@ def plot_metric_bars(metrics_df, metric_col="AUC", title_prefix="Validation", pa
     return fig
 
 
-def plot_confusion_matrices(y_true, y_preds_dict):
+def plot_confusion_matrices(y_true, y_preds_dict, title_prefix=""):
     n_models = len(y_preds_dict)
     cols = min(3, n_models)
     rows = (n_models + cols - 1) // cols
@@ -186,7 +186,9 @@ def plot_confusion_matrices(y_true, y_preds_dict):
         cm = confusion_matrix(y_true, y_pred)
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[i], cbar=False,
                     annot_kws={"size": 12, "weight": "bold"})
-        axes[i].set_title(model_name, fontsize=11, fontweight='bold')
+        # 如果有 title_prefix，则添加到标题前面
+        title = f"{title_prefix} - {model_name}" if title_prefix else model_name
+        axes[i].set_title(title, fontsize=11, fontweight='bold')
         axes[i].set_xlabel('Predicted Label', fontsize=9)
         axes[i].set_ylabel('True Label', fontsize=9)
     for j in range(i + 1, len(axes)):
