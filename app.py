@@ -1,357 +1,309 @@
 import streamlit as st
+import pandas as pd
+import numpy as np
+import re
+import io
+import zipfile
+from scipy import stats
 
-# 页面配置必须放在最前面
-st.set_page_config(page_title="临床多组学自动化分析平台", layout="wide")
-
-# 检查密码（如果设置了 secrets）
+# ==================== 密码验证 ====================
 def check_password():
-    """返回 True 表示用户输入了正确的密码。"""
-    # 确保 session_state 中有了密码状态
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
-
-    # 如果已通过验证，直接返回 True
     if st.session_state.password_correct:
         return True
-
-    # 检查是否设置了 ACCESS_PASSWORD
-    try:
-        correct_password = st.secrets["ACCESS_PASSWORD"]
-    except (KeyError, AttributeError):
-        # 如果未设置密码，允许直接访问（或显示警告）
-        st.warning("系统未设置访问密码，请管理员在 Secrets 中添加 ACCESS_PASSWORD。")
-        # 允许访问（可选），或阻止：
-        # return False
-        return True  # 临时允许访问，实际使用时建议改为 False
-
-    # 显示密码输入框
-    st.markdown("## 🔐 请输入访问密码")
-    password = st.text_input("密码", type="password", placeholder="请输入密码")
+    password = st.text_input("请输入访问密码", type="password")
     if st.button("登录"):
-        if password == correct_password:
+        if password == st.secrets.get("ACCESS_PASSWORD", "admin"):
             st.session_state.password_correct = True
             st.rerun()
         else:
             st.error("😕 密码错误，请重试。")
     return False
 
-# 执行密码验证，如果未通过则停止后续执行
 if not check_password():
     st.stop()
 
-# ---------- 以下是您的原有应用代码（从全局状态初始化开始） ----------
+# ==================== 工具函数 ====================
+def clean_column_name(col):
+    col = re.sub(r'[^a-zA-Z0-9_]', '_', str(col))
+    if col and col[0].isdigit():
+        col = '_' + col
+    return col
 
+def clean_cell(val):
+    if isinstance(val, str):
+        val = val.encode('ascii', 'ignore').decode('ascii')
+        val = re.sub(r'\s+', '_', val)
+        return val if val else 'Unknown'
+    return val
 
-# ---------- 以下是您原有的应用代码 ----------
-# st.title("🔬 临床数据智能分析与机器学习平台")
-import streamlit as st
-import pandas as pd
-import numpy as np
-import re
-import io
-import zipfile
-from utils.data_cleaner import clean_column_names
-from utils.baseline import generate_tableone
-from utils.plot_style import get_palette, PALETTES
+PALETTES = {
+    "Nature": ["#E64B35","#4DBBD5","#00A087","#3C5488","#F39B7F","#8491B4","#91D1C2","#DC0000","#7E6148","#B09C85"],
+    "Science": ["#394A96","#E51E25","#4DAF4A","#984EA3","#FF7F00","#FFFF33","#A65628","#F781BF","#999999"],
+}
+def get_palette(name):
+    return PALETTES.get(name, PALETTES["Nature"])
 
-# 页面配置
+# ==================== 页面配置 ====================
 st.set_page_config(page_title="临床多组学自动化分析平台", layout="wide")
 
-# ========== 全局状态初始化 ==========
 if 'data_uploaded' not in st.session_state:
     st.session_state.update({
         'data_uploaded': False,
         'step1_done': False,
         'step2_done': False,
         'step3_done': False,
-        'step4_done': False,
-        'step5_done': False,
         'df_clean': None,
         'all_outputs': [],
         'final_ml_features': [],
-        'complete_df': None,  # 用于第四步
+        'complete_df': None,
         'y_selector': None,
-        'palette_choice': 'Nature'  # 全局调色盘
+        'palette_choice': 'Nature',
+        'cat_cols': [],
+        'baseline_df': None,
     })
 
-
-# ========== 辅助存储函数 ==========
 def store_figure(fig, filename):
-    """
-    存储 matplotlib 图形到全局 all_outputs。
-    如果同名文件已存在，则替换（删除旧条目再添加）。
-    同时保存 PDF 和 TIFF (300 DPI) 两个版本。
-    """
-    # 删除所有已存在的同名文件（不管扩展名）
-    base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
-    st.session_state.all_outputs = [
-        (f, d) for f, d in st.session_state.all_outputs
-        if not f.startswith(base_name)  # 删除以 base_name 开头的所有条目
-    ]
-
-    # 保存 PDF
-    buf_pdf = io.BytesIO()
-    fig.savefig(buf_pdf, format='pdf', bbox_inches='tight')
-    st.session_state.all_outputs.append((f"{base_name}.pdf", buf_pdf.getvalue()))
-
-    # 保存 TIFF (300 DPI)
-    buf_tiff = io.BytesIO()
-    fig.savefig(buf_tiff, format='tiff', dpi=300, bbox_inches='tight')
-    st.session_state.all_outputs.append((f"{base_name}.tiff", buf_tiff.getvalue()))
-
+    base = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    st.session_state.all_outputs = [(f,d) for f,d in st.session_state.all_outputs if not f.startswith(base)]
+    buf = io.BytesIO()
+    fig.savefig(buf, format='pdf', bbox_inches='tight')
+    st.session_state.all_outputs.append((f"{base}.pdf", buf.getvalue()))
+    buf = io.BytesIO()
+    fig.savefig(buf, format='tiff', dpi=300, bbox_inches='tight')
+    st.session_state.all_outputs.append((f"{base}.tiff", buf.getvalue()))
 
 def store_dataframe(df, filename):
-    """存储 DataFrame 到全局 all_outputs，同名文件自动覆盖（只保留 CSV）"""
-    base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
-    # 删除旧版本
-    st.session_state.all_outputs = [
-        (f, d) for f, d in st.session_state.all_outputs
-        if not f.startswith(base_name)
-    ]
-    csv_bytes = df.to_csv(index=False).encode('utf-8')
-    st.session_state.all_outputs.append((f"{base_name}.csv", csv_bytes))
-
+    base = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    st.session_state.all_outputs = [(f,d) for f,d in st.session_state.all_outputs if not f.startswith(base)]
+    st.session_state.all_outputs.append((f"{base}.csv", df.to_csv(index=False).encode('utf-8')))
 
 def store_string(text, filename):
-    """存储文本，同名文件自动覆盖"""
-    base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
-    st.session_state.all_outputs = [
-        (f, d) for f, d in st.session_state.all_outputs
-        if not f.startswith(base_name)
-    ]
-    st.session_state.all_outputs.append((f"{base_name}.txt", text.encode('utf-8')))
+    base = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    st.session_state.all_outputs = [(f,d) for f,d in st.session_state.all_outputs if not f.startswith(base)]
+    st.session_state.all_outputs.append((f"{base}.txt", text.encode('utf-8')))
 
-
-# ========== 国风 UI ==========
 st.markdown("""
-<style>
-/* 全局背景与字体 */
-.stApp {
-    background-color: #f5f0e8;
-    background-image: 
-        url("data:image/svg+xml,%3Csvg width='100' height='100' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100' height='100' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E"),
-        radial-gradient(ellipse at 20% 50%, rgba(200, 180, 150, 0.08) 0%, transparent 70%),
-        radial-gradient(ellipse at 80% 50%, rgba(180, 160, 130, 0.06) 0%, transparent 70%);
-    font-family: "STKaiti", "KaiTi", "楷体", "华文楷体", "SimSun", "宋体", serif;
-}
-
-h1, h2, h3, h4, h5, h6 {
-    font-family: "STKaiti", "KaiTi", "楷体", "华文楷体", serif;
-    color: #3d2b1a;
-    text-shadow: 2px 2px 4px rgba(0,0,0,0.05);
-    border-bottom: 2px solid #b89b7b;
-    padding-bottom: 0.3em;
-    margin-top: 0.5em;
-    letter-spacing: 2px;
-}
-
-h1 {
-    font-size: 2.8em;
-    letter-spacing: 6px;
-    color: #8b1a1a;
-    text-shadow: 0 0 10px rgba(139, 26, 26, 0.12);
-    border-bottom: 3px solid #8b1a1a;
-    display: inline-block;
-    padding-bottom: 0.2em;
-}
-
-/* 侧边栏 */
-.css-1d391kg, .sidebar-content {
-    background-color: #f0e8db;
-    background-image: linear-gradient(180deg, rgba(200, 180, 160, 0.1) 0%, transparent 100%);
-    border-right: 3px solid #b89b7b;
-    box-shadow: inset -10px 0 20px rgba(0,0,0,0.03);
-}
-
-/* 按钮 */
-.stButton>button {
-    background-color: #8b1a1a;
-    color: #f5f0e8;
-    border: 1px solid #6b3a2a;
-    border-radius: 4px;
-    padding: 0.5em 2em;
-    font-family: "STKaiti", "KaiTi", "楷体", serif;
-    font-size: 1.1em;
-    letter-spacing: 2px;
-    transition: all 0.3s;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-}
-.stButton>button:hover {
-    background-color: #a52a2a;
-    box-shadow: 0 6px 12px rgba(139, 26, 26, 0.3);
-    transform: translateY(-2px);
-}
-.stButton>button:active {
-    transform: translateY(1px);
-}
-
-/* 表格 */
-.dataframe th {
-    background-color: #d4c5b2;
-    color: #3d2b1a;
-    border: 1px solid #b89b7b;
-}
-.dataframe td {
-    border: 1px solid #d4c5b2;
-}
-
-/* 标签页 */
-.stTabs [data-baseweb="tab-list"] {
-    background-color: #e8ddd0;
-    border-radius: 6px 6px 0 0;
-}
-.stTabs [data-baseweb="tab"][aria-selected="true"] {
-    background-color: #8b1a1a;
-    color: #f5f0e8;
-}
-.stTabs [data-baseweb="tab-panel"] {
-    background-color: rgba(255, 248, 235, 0.5);
-    border: 1px solid #cbb5a0;
-}
-
-/* 进度条 */
-.stProgress > div > div {
-    background-color: #8b1a1a;
-    background-image: linear-gradient(90deg, #8b1a1a, #c0392b);
-}
-</style>
+    <style>
+    .stApp { background-color: #fdfbf7; }
+    h1, h2, h3 { color: #4a4266; font-family: "Microsoft YaHei", sans-serif; }
+    .stButton>button { background-color: #ff461f; color: white; border-radius: 5px; border: none; }
+    .stButton>button:hover { background-color: #c3270b; }
+    </style>
 """, unsafe_allow_html=True)
 
 st.title("🔬 临床数据智能分析与机器学习平台")
-st.markdown(
-    "一键完成：**基线表 -> 回归迭代 -> 筛选特征 (LASSO/Boruta) -> 机器学习 -> SHAP解释**。支持 CNS 级别可视化下载。")
+st.markdown("一键完成：**基线表 → 回归迭代 → 筛选特征 → 机器学习 → SHAP解释**。支持 CNS 级别可视化下载。")
 
-# ========== 侧边栏 ==========
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("⚙️ 分析流程导航")
-    mode = st.radio("选择模式", ["主队列完整分析"])
-
+    mode = st.radio("选择模式", ["主队列完整分析"], key="mode_radio")
     if mode == "主队列完整分析":
         st.markdown("---")
-        # 步骤状态
-        for i in range(1, 6):
+        for i in range(1, 7):
             key = f'step{i}_done'
-            label = ["数据预处理与基线表", "单/多因素回归与迭代", "LASSO/Boruta 特征筛选",
-                     "机器学习建模与评估", "SHAP 模型解释"][i - 1]
+            labels = ["数据预处理与基线表", "单/多因素回归与迭代", "LASSO/Boruta 特征筛选",
+                      "机器学习建模与评估", "SHAP 模型解释", "外部验证"]
             if st.session_state.get(key, False):
-                st.success(f"✅ Step {i}: {label}")
+                st.success(f"✅ Step {i}: {labels[i-1]}")
             else:
-                st.warning(f"⏳ Step {i}: {label}")
-
+                st.warning(f"⏳ Step {i}: {labels[i-1]}")
         st.markdown("---")
-        # 统一调色盘选择
-        palette_choice = st.selectbox(
-            "🎨 选择 SCI 调色盘",
-            list(PALETTES.keys()),
-            index=0,
-            key="global_palette"
-        )
-        st.session_state.palette_choice = palette_choice
+        palette = st.selectbox("🎨 选择 SCI 调色盘", list(PALETTES.keys()), index=0, key="global_palette")
+        st.session_state.palette_choice = palette
 
-        # 统一下载按钮
         if st.session_state.all_outputs:
             st.markdown("---")
             st.subheader("📦 一键导出所有结果")
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for fname, data in st.session_state.all_outputs:
                     zf.writestr(fname, data)
-            st.download_button(
-                label="📥 下载全部结果 (ZIP)",
-                data=zip_buffer.getvalue(),
-                file_name="Full_Analysis_Results.zip",
-                mime="application/zip",
-                key="global_download"
-            )
+            st.download_button("📥 下载全部结果 (ZIP)", zip_buf.getvalue(), "Full_Analysis_Results.zip", "application/zip", key="global_download")
             if st.button("🗑️ 清空所有结果"):
                 st.session_state.all_outputs = []
                 st.rerun()
 
-# ========== 主工作区 ==========
+# ==================== 主工作区 ====================
 if mode == "主队列完整分析":
     # ---------- 第一步 ----------
-    st.header("第一步：数据上传与基线特征分析 (Table 1)")
-    uploaded_file = st.file_uploader("请上传临床数据集 (CSV 或 Excel 格式)", type=['csv', 'xlsx'])
+    st.header("第一步：数据上传、预处理与基线表")
+    uploaded = st.file_uploader("上传 CSV 或 Excel 文件", type=["csv", "xlsx"], key="main_upload")
+    if uploaded:
+        try:
+            if uploaded.name.endswith('.csv'):
+                df = pd.read_csv(uploaded)
+            else:
+                df = pd.read_excel(uploaded)
+            df.columns = [clean_column_name(c) for c in df.columns]
+            for col in df.select_dtypes(include=['object']).columns:
+                df[col] = df[col].apply(lambda x: clean_cell(x) if pd.notnull(x) else x)
+            st.session_state.df_raw = df.copy()
+            st.success("文件加载并清理完成。")
+        except Exception as e:
+            st.error(f"读取失败: {e}")
+            st.stop()
 
-    if uploaded_file is not None:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-        st.success("数据上传成功！正在进行列名规范化处理...")
-        df = clean_column_names(df)
-        st.session_state.df_clean = df
-        st.session_state.data_uploaded = True
-        with st.expander("预览规范化后的数据", expanded=False):
-            st.dataframe(df.head())
+        st.subheader("原始数据预览")
+        st.dataframe(df.head())
 
-    if st.session_state.data_uploaded:
-        st.markdown("### 📊 生成基线表 (Table 1)")
-        df = st.session_state.df_clean
-        all_cols = df.columns.tolist()
+        # 缺失值处理
+        st.subheader("缺失值处理策略")
+        missing_strategy = st.selectbox(
+            "选择插补方法",
+            ["None (keep NA)", "Drop rows with NA", "Mean/Median fill", "KNN Impute", "Multiple Imputation (MICE)"],
+            index=2
+        )
+        cat_cols = st.multiselect("指定分类变量（用于编码和填充）", options=df.columns.tolist(), default=[])
+        st.session_state.cat_cols = cat_cols
 
-        col1, col2 = st.columns(2)
-        with col1:
-            groupby_var = st.selectbox("请选择分组变量 (如：Outcome, Treatment)", options=["无分组"] + all_cols)
-        with col2:
-            categorical_vars = st.multiselect("请指定分类变量 (二分类/多分类，未选则默认视为连续变量)", options=all_cols)
-        nonnormal_vars = st.multiselect("请指定非正态分布的连续变量 (将使用中位数和IQR)",
-                                        options=[c for c in all_cols if c not in categorical_vars])
+        if st.button("✔️ 应用预处理"):
+            df_clean = st.session_state.df_raw.copy()
+            from sklearn.preprocessing import LabelEncoder
 
-        if st.button("🚀 开始计算并生成基线表"):
-            with st.spinner('正在自动应用统计学检验...'):
-                mytable = generate_tableone(df, groupby_var, categorical_vars, nonnormal_vars)
+            encoders = {}
+            for col in cat_cols:
+                if col in df_clean.columns:
+                    le = LabelEncoder()
+                    # 转为 str 以确保一致性，再 fit_transform
+                    df_clean[col] = le.fit_transform(df[col].astype(str)).astype(int)  # 转为整数
+                    encoders[col] = le
+            st.session_state.encoders = encoders
+            if missing_strategy == "Drop rows with NA":
+                df_clean.dropna(inplace=True)
+            elif missing_strategy == "Mean/Median fill":
+                for col in df_clean.select_dtypes(include=np.number).columns:
+                    if df_clean[col].isnull().any():
+                        df_clean[col].fillna(df_clean[col].median(), inplace=True)
+                for col in cat_cols:
+                    if col in df_clean.columns and df_clean[col].isnull().any():
+                        df_clean[col].fillna(df_clean[col].mode()[0] if not df_clean[col].mode().empty else "Unknown", inplace=True)
+            elif missing_strategy == "KNN Impute":
+                from sklearn.impute import KNNImputer
+                num_cols = df_clean.select_dtypes(include=np.number).columns.tolist()
+                if num_cols:
+                    imputer = KNNImputer(n_neighbors=5)
+                    df_clean[num_cols] = imputer.fit_transform(df_clean[num_cols])
+                for col in cat_cols:
+                    if col in df_clean.columns and df_clean[col].isnull().any():
+                        df_clean[col].fillna(df_clean[col].mode()[0] if not df_clean[col].mode().empty else "Unknown", inplace=True)
+            elif missing_strategy == "Multiple Imputation (MICE)":
+                from sklearn.experimental import enable_iterative_imputer
+                from sklearn.impute import IterativeImputer
+                from sklearn.linear_model import BayesianRidge
+                num_cols = df_clean.select_dtypes(include=np.number).columns.tolist()
+                if num_cols:
+                    imputer = IterativeImputer(estimator=BayesianRidge(), max_iter=10, random_state=42)
+                    df_clean[num_cols] = imputer.fit_transform(df_clean[num_cols])
+                for col in cat_cols:
+                    if col in df_clean.columns and df_clean[col].isnull().any():
+                        df_clean[col].fillna(df_clean[col].mode()[0] if not df_clean[col].mode().empty else "Unknown", inplace=True)
+
+            st.session_state.df_clean = df_clean
+            st.success("预处理完成！")
+            st.dataframe(df_clean.head())
+
+            # 缺失值报告
+            na_cnt = df_clean.isnull().sum()
+            na_df = pd.DataFrame({'Count': na_cnt, 'Percentage': (na_cnt/len(df_clean))*100})
+            st.write("缺失值报告：", na_df[na_df['Count'] > 0] if na_df['Count'].sum() > 0 else "无缺失值")
+
+        # 基线表（独立于预处理按钮，只要 df_clean 存在就显示）
+        if st.session_state.df_clean is not None:
+            st.markdown("---")
+            st.subheader("📊 基线特征表 (Table 1)")
+            all_vars = st.session_state.df_clean.columns.tolist()
+            group_col = st.selectbox("选择分组变量（可选）", ["无"] + all_vars, key="baseline_group")
+            selected_vars = st.multiselect("选择需要比较的变量（留空则全部纳入）", all_vars, default=all_vars, key="baseline_vars")
+            if st.button("生成基线表", key="generate_baseline"):
+                df_bl = st.session_state.df_clean
+                cat_vars = st.session_state.cat_cols
+                if group_col != "无":
+                    groups = sorted(df_bl[group_col].dropna().unique())
+                    table = []
+                    for var in selected_vars:
+                        if var == group_col:
+                            continue
+                        if var in cat_vars:
+                            for level in sorted(df_bl[var].dropna().unique()):
+                                row = [f"{var} = {level}"]
+                                for g in groups:
+                                    sub = df_bl[df_bl[group_col] == g]
+                                    n = sub[var].eq(level).sum()
+                                    rate = n/len(sub)*100 if len(sub)>0 else 0
+                                    row.append(f"{n} ({rate:.1f}%)")
+                                ct = pd.crosstab(df_bl[group_col], df_bl[var] == level)
+                                if ct.shape == (2,2):
+                                    _, p, _, _ = stats.chi2_contingency(ct)
+                                    row.append(f"{p:.4f}")
+                                else:
+                                    row.append("N/A")
+                                table.append(row)
+                        else:
+                            row = [var]
+                            vals = [df_bl[df_bl[group_col] == g][var].dropna() for g in groups]
+                            for v in vals:
+                                row.append(f"{v.mean():.2f} ± {v.std():.2f}")
+                            if len(groups) == 2:
+                                _, p = stats.ttest_ind(*vals)
+                            else:
+                                _, p = stats.f_oneway(*vals)
+                            row.append(f"{p:.4f}")
+                            table.append(row)
+                    col_names = ["Variable"] + [f"{g} (n={df_bl[group_col].eq(g).sum()})" for g in groups] + ["P-value"]
+                    baseline_df = pd.DataFrame(table, columns=col_names)
+                    st.session_state.baseline_df = baseline_df
+                    store_dataframe(baseline_df, "Baseline_Table.csv")
+                else:
+                    st.info("未选择分组变量，仅展示描述统计。")
+                    baseline_df = df_bl[selected_vars].describe().T.reset_index().rename(columns={"index":"Variable"})
+                    st.session_state.baseline_df = baseline_df
+
+            # 若 baseline_df 已生成，则持续显示
+            if st.session_state.baseline_df is not None:
+                st.dataframe(st.session_state.baseline_df)
+                st.download_button("📥 下载基线表 CSV", st.session_state.baseline_df.to_csv(index=False), "baseline.csv")
+
+            # 第一步完成标记
+            if st.session_state.baseline_df is not None:
                 st.session_state.step1_done = True
-                st.markdown("#### 基线分析结果")
-                st.text(mytable.tabulate(headers="keys", tablefmt="github"))
-                # 存储
-                csv_bytes = mytable.to_csv().encode('utf-8')
-                st.session_state.all_outputs.append(("Table1_Baseline.csv", csv_bytes))
-                txt = mytable.tabulate(headers="keys", tablefmt="github")
-                store_string(txt, "Table1_Baseline.txt")
-                # 独立下载
-                st.download_button(
-                    label="📥 下载基线表 (CSV)",
-                    data=csv_bytes,
-                    file_name="Table1_Baseline.csv",
-                    mime="text/csv"
-                )
+            else:
+                st.info("请至少生成一次基线表以完成第一步。")
 
-    # ---------- 第二步 ----------
-    if st.session_state.step1_done:
+    # ---------- 第二步（回归分析） ----------
+    if st.session_state.get('step1_done', False):
         st.markdown("---")
         st.header("第二步：Logistic / Cox 回归与动态累积迭代分析")
-        from utils.regression import run_univariate_regression, run_multivariate_regression, plot_forest_chart
+        try:
+            from utils.regression import run_univariate_regression, run_multivariate_regression, plot_forest_chart
+        except ImportError:
+            st.error("缺少回归分析模块 (utils/regression.py)，请先创建该模块。")
+            st.stop()
 
         df = st.session_state.df_clean
         all_cols = df.columns.tolist()
 
         st.markdown("### ⚙️ 全局回归模型参数配置")
-        reg_mode = st.selectbox("请选择分析所用的底层回归模型", ["Logistic 回归", "Cox 比例风险生存回归"])
+        reg_mode = st.selectbox("选择底层回归模型", ["Logistic 回归", "Cox 比例风险生存回归"])
         time_var, y_var = None, None
-        col_y1, col_y2 = st.columns(2)
-        with col_y1:
+        col1, col2 = st.columns(2)
+        with col1:
             if reg_mode == "Logistic 回归":
-                y_var = st.selectbox("请选择二分类因变量 (Y, 如 Outcome)", options=all_cols)
+                y_var = st.selectbox("二分类因变量 (Y)", all_cols)
             else:
-                time_var = st.selectbox("请选择生存时间变量 (Time, 如 Survival_Months)", options=all_cols)
-        with col_y2:
+                time_var = st.selectbox("生存时间变量 (Time)", all_cols)
+        with col2:
             if reg_mode == "Cox 比例风险生存回归":
-                y_var = st.selectbox("请选择生存结局变量 (Status, 如 Event_Status)", options=all_cols)
+                y_var = st.selectbox("生存结局变量 (Status)", all_cols)
 
-        # 排除因变量
         exclude = [y_var, time_var] if time_var else [y_var]
         potential_x = [c for c in all_cols if c not in exclude]
+        palette = st.session_state.palette_choice
 
-        # 调色盘（使用全局）
-        palette_choice = st.session_state.palette_choice
-
-        tab_uni, tab_multi, tab_iter = st.tabs(
-            ["📊 单因素分析", "📈 多因素分析", "🔄 累积迭代模型"]
-        )
-
-        # ---- 单因素 ----
-        with tab_uni:
+        tab1, tab2, tab3 = st.tabs(["📊 单因素分析", "📈 多因素分析", "🔄 累积迭代模型"])
+        with tab1:
             st.markdown("#### 单因素回归分析筛选")
             uni_all = st.checkbox("一键全选", value=False, key="uni_all")
             default_uni = potential_x if uni_all else []
@@ -360,117 +312,130 @@ if mode == "主队列完整分析":
                 if not selected_uni:
                     st.warning("请至少选择一个自变量！")
                 else:
-                    m_type = "Logistic" if reg_mode == "Logistic 回归" else "Cox"
-                    uni_res = run_univariate_regression(df, y_var, selected_uni, model_type=m_type, time_var=time_var)
+                    mtype = "Logistic" if reg_mode == "Logistic 回归" else "Cox"
+                    uni_res = run_univariate_regression(df, y_var, selected_uni, model_type=mtype, time_var=time_var)
                     st.subheader("单因素回归结果表")
                     st.dataframe(uni_res.style.format(precision=4))
-                    metric_col = "Odds Ratio (OR)" if m_type == "Logistic" else "Hazard Ratio (HR)"
-                    fig = plot_forest_chart(uni_res, metric_col, palette_name=palette_choice)
+                    metric_col = "Odds Ratio (OR)" if mtype == "Logistic" else "Hazard Ratio (HR)"
+                    fig = plot_forest_chart(uni_res, metric_col, palette_name=palette)
                     st.pyplot(fig)
                     store_dataframe(uni_res, "Univariate_Regression_Results.csv")
                     store_figure(fig, "Univariate_Forest.pdf")
-                    st.session_state.step2_done = True  # 解锁第三步
+                    st.session_state.step2_done = True
 
-        # ---- 多因素 ----
-        with tab_multi:
+        with tab2:
             st.markdown("#### 多因素回归模型构建")
             multi_all = st.checkbox("一键全选", value=False, key="multi_all")
             default_multi = potential_x if multi_all else []
-            selected_multi = st.multiselect("选择共同进入多因素模型的变量", potential_x, default=default_multi,
-                                            key="multi_x")
+            selected_multi = st.multiselect("选择共同进入多因素模型的变量", potential_x, default=default_multi, key="multi_x")
             if st.button("🚀 运行多因素分析并出图"):
                 if not selected_multi:
                     st.warning("请选择自变量组合！")
                 else:
-                    m_type = "Logistic" if reg_mode == "Logistic 回归" else "Cox"
-                    multi_res = run_multivariate_regression(df, y_var, selected_multi, model_type=m_type,
-                                                            time_var=time_var)
+                    mtype = "Logistic" if reg_mode == "Logistic 回归" else "Cox"
+                    multi_res = run_multivariate_regression(df, y_var, selected_multi, model_type=mtype, time_var=time_var)
                     st.subheader("多因素强校正结果表")
                     st.dataframe(multi_res.style.format(precision=4))
-                    metric_col = "Odds Ratio (OR)" if m_type == "Logistic" else "Hazard Ratio (HR)"
-                    fig = plot_forest_chart(multi_res, metric_col, palette_name=palette_choice)
+                    metric_col = "Odds Ratio (OR)" if mtype == "Logistic" else "Hazard Ratio (HR)"
+                    fig = plot_forest_chart(multi_res, metric_col, palette_name=palette)
                     st.pyplot(fig)
                     store_dataframe(multi_res, "Multivariate_Regression_Results.csv")
                     store_figure(fig, "Multivariate_Forest.pdf")
-                    st.session_state.step2_done = True  # 解锁第三步
+                    st.session_state.step2_done = True
 
-        # ---- 迭代 ----
-        with tab_iter:
+        with tab3:
             st.markdown("#### 🔄 临床变量动态累积迭代模型")
             if 'iter_vars_pool' not in st.session_state:
                 st.session_state.iter_vars_pool = []
-            col_it1, col_it2 = st.columns([3, 1])
-            with col_it1:
+            col_a, col_b = st.columns([3,1])
+            with col_a:
                 available = [c for c in potential_x if c not in st.session_state.iter_vars_pool]
                 next_var = st.selectbox("选择要追加的变量", options=available if available else ["无可用变量"])
-            with col_it2:
+            with col_b:
                 if st.button("➕ 确认追加") and available:
                     st.session_state.iter_vars_pool.append(next_var)
                     st.rerun()
-
             if st.session_state.iter_vars_pool:
                 st.info(f"当前变量序列: {' ➡️ '.join(st.session_state.iter_vars_pool)}")
                 if st.button("🗑️ 清空当前迭代模型"):
                     st.session_state.iter_vars_pool = []
                     st.rerun()
-                m_type = "Logistic" if reg_mode == "Logistic 回归" else "Cox"
-                iter_res = run_multivariate_regression(df, y_var, st.session_state.iter_vars_pool,
-                                                       model_type=m_type, time_var=time_var)
+                mtype = "Logistic" if reg_mode == "Logistic 回归" else "Cox"
+                iter_res = run_multivariate_regression(df, y_var, st.session_state.iter_vars_pool, model_type=mtype, time_var=time_var)
                 st.subheader("当前迭代轮次模型表现")
                 st.dataframe(iter_res.style.format(precision=4))
-                metric_col = "Odds Ratio (OR)" if m_type == "Logistic" else "Hazard Ratio (HR)"
-                fig_iter = plot_forest_chart(iter_res, metric_col, palette_name=palette_choice)
-                st.pyplot(fig_iter)
-                iter_count = len(st.session_state.iter_vars_pool)
-                store_dataframe(iter_res, f"Iteration_Model_{iter_count}_Results.csv")
-                store_figure(fig_iter, f"Iteration_Model_{iter_count}_Forest.pdf")
-                st.session_state.step2_done = True  # 解锁第三步
-    # ---------- 第三步 ----------
-    if st.session_state.step2_done:
+                metric_col = "Odds Ratio (OR)" if mtype == "Logistic" else "Hazard Ratio (HR)"
+                fig = plot_forest_chart(iter_res, metric_col, palette_name=palette)
+                st.pyplot(fig)
+                store_dataframe(iter_res, f"Iteration_Model_{len(st.session_state.iter_vars_pool)}_Results.csv")
+                store_figure(fig, f"Iteration_Model_{len(st.session_state.iter_vars_pool)}_Forest.pdf")
+                st.session_state.step2_done = True
+
+    # ---------- 第三步（特征筛选） ----------
+    if st.session_state.get('step2_done', False):
         st.markdown("---")
         st.header("第三步：全因素 LASSO 与 Boruta 双重特征筛选")
-
-        from utils.feature_selection import (
-            run_lasso_selection, run_boruta_selection,
-            plot_feature_comparison, plot_lasso_path,
-            plot_boruta_importance_distribution,
-            plot_venn_diagram, plot_correlation_heatmap
-        )
+        try:
+            from utils.feature_selection import (
+                run_lasso_selection, run_boruta_selection,
+                plot_feature_comparison, plot_lasso_path,
+                plot_boruta_importance_distribution,
+                plot_venn_diagram, plot_correlation_heatmap
+            )
+        except ImportError:
+            st.error("缺少特征筛选模块 (utils/feature_selection.py)，请先创建该模块。")
+            st.stop()
 
         df = st.session_state.df_clean
         all_cols = df.columns.tolist()
 
         st.markdown("### 🧬 特征筛选数据矩阵构建")
-        y_selector = st.selectbox("请确认用于特征筛选的因变量", options=all_cols, index=0)
+        y_selector = st.selectbox("确认用于特征筛选的因变量", all_cols, index=0)
         X_cols = [c for c in all_cols if c != y_selector]
         st.session_state.y_selector = y_selector
 
-        # ===== 在这里定义 X 和 y（与 df 同级） =====
         complete_df = df[[y_selector] + X_cols].dropna()
         st.session_state.complete_df = complete_df
         X = complete_df[X_cols]
         y = complete_df[y_selector]
 
-        # 调色板选择
+        st.markdown("### ⚙️ Lasso 惩罚力度选择")
+        alpha_strategy = st.radio(
+            "选择 lambda 策略:",
+            ["lambda.min", "lambda.1se"],
+            index=0, horizontal=True,
+            help="lambda.min：最优预测；lambda.1se：更稀疏的模型"
+        )
+
         col_run1, col_run2 = st.columns(2)
         with col_run1:
-            palette_choice_s3 = st.selectbox("选择调色盘", list(PALETTES.keys()), key="s3_pal")
+            palette_s3 = st.selectbox("选择调色盘", list(PALETTES.keys()), key="s3_pal")
         with col_run2:
             start_filter = st.button("🚀 一键触发双算法交叉降维")
 
-        # 扩展可视化复选框（建议放在按钮外，但放在这里也行）
-        st.markdown("---")
-        st.markdown("### 📊 扩展可视化图表（出版级）")
-        show_lasso_path = st.checkbox("显示 LASSO 系数路径图", value=True)
-        show_boruta_dist = st.checkbox("显示 Boruta 重要性分布图", value=True)
-        show_venn = st.checkbox("显示 Venn 图", value=True)
-        show_heatmap = st.checkbox("显示特征相关性热图", value=True)
+        st.markdown("### 📊 扩展可视化（可选）")
+        show_path = st.checkbox("LASSO 系数路径图", value=True)
+        show_dist = st.checkbox("Boruta 重要性分布图", value=True)
+        show_venn = st.checkbox("Venn 图", value=True)
+        show_heatmap = st.checkbox("特征相关性热图", value=True)
 
         if start_filter or 'lasso_feats' in st.session_state:
             with st.spinner("双引擎并发计算中..."):
-                # 现在 X 和 y 已定义，可以安全调用
+                # 缺失值安全处理
+                if X.isnull().sum().sum() > 0 or y.isnull().sum() > 0:
+                    st.warning("检测到缺失值，已自动填充。")
+                    for col in X.columns:
+                        if X[col].dtype in ['float64', 'int64']:
+                            X[col].fillna(X[col].median(), inplace=True)
+                        else:
+                            X[col].fillna(X[col].mode()[0] if not X[col].mode().empty else "Unknown", inplace=True)
+                    if y.isnull().sum() > 0:
+                        y.fillna(y.mode()[0] if not y.mode().empty else 0, inplace=True)
+
                 if 'lasso_feats' not in st.session_state:
-                    lasso_feats, lasso_imp = run_lasso_selection(X, y)  # 正常工作
+                    lasso_feats, lasso_imp = run_lasso_selection(
+                        X, y, cv=5, alpha_strategy=alpha_strategy, random_state=42
+                    )
                     boruta_feats, tentative_feats, boruta_imp = run_boruta_selection(X, y)
                     st.session_state.update({
                         'lasso_feats': lasso_feats,
@@ -482,85 +447,70 @@ if mode == "主队列完整分析":
 
                 lf = st.session_state.lasso_feats
                 bf = st.session_state.boruta_feats
-                both_positive = list(set(lf) & set(bf))
-                union_positive = list(set(lf) | set(bf))
+                both = list(set(lf) & set(bf))
+                union = list(set(lf) | set(bf))
 
                 st.success("✨ 特征筛选完成！")
                 col_m1, col_m2, col_m3 = st.columns(3)
                 col_m1.metric("LASSO 检出变量", f"{len(lf)} 个")
                 col_m2.metric("Boruta 确认变量", f"{len(bf)} 个")
-                col_m3.metric("双阳性重叠变量 (交集)", f"{len(both_positive)} 个")
+                col_m3.metric("双阳性交集", f"{len(both)} 个")
 
-                st.markdown("### 🎯 机器学习入组变量策略抉择")
+                st.markdown("### 🎯 入组变量策略")
                 strategy = st.radio(
-                    "请选择用于下一步模型构建的最终特征集：",
+                    "选择最终特征集：",
                     [
-                        f"仅使用 LASSO 阳性变量 ({len(lf)}个)",
-                        f"仅使用 Boruta 确认阳性变量 ({len(bf)}个)",
-                        f"双阳性严格交集变量 ({len(both_positive)}个) [🔥 推荐：最稳健]",
-                        f"全集并集变量 ({len(union_positive)}个)"
+                        f"仅 LASSO 阳性 ({len(lf)}个)",
+                        f"仅 Boruta 阳性 ({len(bf)}个)",
+                        f"双阳性交集 ({len(both)}个) [推荐]",
+                        f"并集 ({len(union)}个)"
                     ]
                 )
-
-                if "仅使用 LASSO" in strategy:
+                if "仅 LASSO" in strategy:
                     st.session_state.final_ml_features = lf
-                elif "仅使用 Boruta" in strategy:
+                elif "仅 Boruta" in strategy:
                     st.session_state.final_ml_features = bf
-                elif "双阳性严格交集" in strategy:
-                    st.session_state.final_ml_features = both_positive
+                elif "交集" in strategy:
+                    st.session_state.final_ml_features = both
                 else:
-                    st.session_state.final_ml_features = union_positive
+                    st.session_state.final_ml_features = union
 
-                st.info(f"📋 当前锁定的入组特征序列: {', '.join(st.session_state.final_ml_features)}")
+                st.info(f"📋 锁定特征: {', '.join(st.session_state.final_ml_features)}")
 
-                # 主对比图
-                pal_colors = get_palette(palette_choice_s3)
-                fig_fs = plot_feature_comparison(
-                    st.session_state.lasso_imp,
-                    st.session_state.boruta_imp,
-                    strategy, both_positive, pal_colors
-                )
+                pal = get_palette(palette_s3)
+                fig_fs = plot_feature_comparison(st.session_state.lasso_imp, st.session_state.boruta_imp, strategy, both, pal)
                 st.pyplot(fig_fs)
                 store_figure(fig_fs, "Feature_Selection_Comparison.pdf")
                 store_dataframe(st.session_state.lasso_imp, "LASSO_Importance.csv")
                 store_dataframe(st.session_state.boruta_imp, "Boruta_Importance.csv")
 
-                # 扩展图
-                if show_lasso_path:
+                if show_path:
                     with st.spinner("绘制 LASSO 路径图..."):
-                        fig_path = plot_lasso_path(X, y, alphas=50, palette_colors=pal_colors)
+                        fig_path = plot_lasso_path(X, y, alphas=50, palette_colors=pal)
                         st.pyplot(fig_path)
                         store_figure(fig_path, "LASSO_Path.pdf")
-                if show_boruta_dist:
+                if show_dist:
                     with st.spinner("绘制 Boruta 分布图..."):
-                        fig_dist = plot_boruta_importance_distribution(
-                            st.session_state.boruta_imp, palette_colors=pal_colors
-                        )
+                        fig_dist = plot_boruta_importance_distribution(st.session_state.boruta_imp, palette_colors=pal)
                         st.pyplot(fig_dist)
                         store_figure(fig_dist, "Boruta_Distribution.pdf")
                 if show_venn:
                     with st.spinner("绘制 Venn 图..."):
-                        fig_venn = plot_venn_diagram(
-                            st.session_state.lasso_feats,
-                            st.session_state.boruta_feats,
-                            st.session_state.tentative_feats,
-                            palette_colors=pal_colors
-                        )
+                        fig_venn = plot_venn_diagram(lf, bf, None, palette_colors=pal)
                         st.pyplot(fig_venn)
                         store_figure(fig_venn, "Venn_Diagram.pdf")
                 if show_heatmap:
                     with st.spinner("绘制相关性热图..."):
                         if len(st.session_state.final_ml_features) > 1:
-                            fig_heat = plot_correlation_heatmap(
-                                X, st.session_state.final_ml_features, palette_colors=pal_colors
-                            )
+                            fig_heat = plot_correlation_heatmap(X, st.session_state.final_ml_features, palette_colors=pal)
                             st.pyplot(fig_heat)
                             store_figure(fig_heat, "Correlation_Heatmap.pdf")
                         else:
-                            st.warning("选定的特征数量少于2，无法绘制热图。")
-
+                            st.warning("特征数量少于2，无法绘制热图。")
                 st.session_state.step3_done = True
                 st.success("✅ 特征筛选完成，已解锁下一步机器学习建模。")
+
+    # 后续步骤（第四、五、六步）可依此类推
                 # ================== 第四步：机器学习 ==================
                 if st.session_state.step3_done:
                     st.markdown("---")
@@ -587,12 +537,11 @@ if mode == "主队列完整分析":
                         y = complete_df[y_col]
 
                         # ---------- 单变量 AUC 分析（增强图表类型选择） ----------
-                        # ---------- 单变量 AUC 分析（改为 ROC 曲线） ----------
                         st.markdown("### 📊 单个特征独立 ROC 曲线分析")
                         with st.spinner("正在绘制每个特征的 ROC 曲线..."):
                             # 直接调用 ROC 曲线绘制函数，传入原始 X 和 y
                             fig_univar_roc = plot_univariate_roc_curves(X, y, feature_names=final_features,
-                                                                        palette_name=palette_choice)
+                                                                        palette_name=st.session_state.palette_choice)
                             if fig_univar_roc is not None:
                                 st.pyplot(fig_univar_roc)
                                 store_figure(fig_univar_roc, "Univariate_ROC_Curves.pdf")
@@ -707,92 +656,159 @@ if mode == "主队列完整分析":
                             ])
 
                             with tab_cal:
-                                st.markdown("#### 校准曲线")
-                                # 训练集校准
+                                # ========== 校准曲线 (Calibration Curves) ==========
+                                st.markdown("#### 校准曲线 (Calibration Curves)")
+                                col_cal1, col_cal2 = st.columns(2)
                                 best_model_name = df_test_metrics.loc[df_test_metrics['AUC'].idxmax()]['Model']
-                                # 获取最佳模型的预测概率（需要从 train_probs 中提取）
-                                if best_model_name in train_probs:
-                                    fig_cal_train = plot_calibration_curve(y_train, train_probs[best_model_name],
-                                                                           best_model_name + " (Train)",
-                                                                           palette_name=palette_choice)
-                                    st.pyplot(fig_cal_train)
-                                    store_figure(fig_cal_train, "Calibration_Curve_Train.pdf")
-                                # 验证集校准
-                                if best_model_name in test_probs:
-                                    fig_cal_test = plot_calibration_curve(y_test, test_probs[best_model_name],
-                                                                          best_model_name + " (Validation)",
-                                                                          palette_name=palette_choice)
-                                    st.pyplot(fig_cal_test)
-                                    store_figure(fig_cal_test, "Calibration_Curve_Test.pdf")
 
-                                st.markdown("#### 决策曲线")
-                                if best_model_name in test_probs:
-                                    fig_dca = plot_decision_curve(y_test, test_probs[best_model_name],
-                                                                  best_model_name + " (Validation)",
-                                                                  palette_name=palette_choice)
-                                    st.pyplot(fig_dca)
-                                    store_figure(fig_dca, "Decision_Curve_Test.pdf")
+                                with col_cal1:
+                                    st.markdown("**训练集 (Training Set)**")
+                                    if best_model_name in train_probs:
+                                        fig_cal_train = plot_calibration_curve(y_train, train_probs[best_model_name],
+                                                                               best_model_name + " (Train)",
+                                                                               palette_name=st.session_state.palette_choice)
+                                        st.pyplot(fig_cal_train)
+                                        store_figure(fig_cal_train, "Calibration_Curve_Train.pdf")
+                                    else:
+                                        st.warning("无训练集预测概率。")
+
+                                with col_cal2:
+                                    st.markdown("**验证集 (Validation Set)**")
+                                    if best_model_name in test_probs:
+                                        fig_cal_test = plot_calibration_curve(y_test, test_probs[best_model_name],
+                                                                              best_model_name + " (Validation)",
+                                                                              palette_name=st.session_state.palette_choice)
+                                        st.pyplot(fig_cal_test)
+                                        store_figure(fig_cal_test, "Calibration_Curve_Test.pdf")
+                                    else:
+                                        st.warning("无验证集预测概率。")
+
+                                # ========== 决策曲线 (Decision Curve Analysis) ==========
+                                st.markdown("#### 决策曲线 (Decision Curve Analysis)")
+                                col_dca1, col_dca2 = st.columns(2)
+
+                                with col_dca1:
+                                    st.markdown("**训练集 (Training Set)**")
+                                    if best_model_name in train_probs:
+                                        fig_dca_train = plot_decision_curve(y_train, train_probs[best_model_name],
+                                                                            best_model_name + " (Train)",
+                                                                            palette_name=st.session_state.palette_choice)
+                                        st.pyplot(fig_dca_train)
+                                        store_figure(fig_dca_train, "Decision_Curve_Train.pdf")
+                                    else:
+                                        st.warning("无训练集预测概率。")
+
+                                with col_dca2:
+                                    st.markdown("**验证集 (Validation Set)**")
+                                    if best_model_name in test_probs:
+                                        fig_dca_test = plot_decision_curve(y_test, test_probs[best_model_name],
+                                                                           best_model_name + " (Validation)",
+                                                                           palette_name=st.session_state.palette_choice)
+                                        st.pyplot(fig_dca_test)
+                                        store_figure(fig_dca_test, "Decision_Curve_Test.pdf")
+                                    else:
+                                        st.warning("无验证集预测概率。")
 
                             # ---------- Tab: ROC ----------
                             with tab_roc:
                                 col_r1, col_r2 = st.columns(2)
                                 with col_r1:
-                                    fig_roc_train = plot_multi_roc(y_train, train_probs, "Training", palette_choice)
+                                    fig_roc_train = plot_multi_roc(y_train, train_probs, "Training", st.session_state.palette_choice)
                                     st.pyplot(fig_roc_train)
                                     store_figure(fig_roc_train, "ROC_Train.pdf")
                                 with col_r2:
-                                    fig_roc_test = plot_multi_roc(y_test, test_probs, "Validation", palette_choice)
+                                    fig_roc_test = plot_multi_roc(y_test, test_probs, "Validation", st.session_state.palette_choice)
                                     st.pyplot(fig_roc_test)
                                     store_figure(fig_roc_test, "ROC_Validation.pdf")
 
                             # ---------- Tab: 模型性能对比（多种图表） ----------
                             with tab_bar:
                                 st.markdown("#### 模型性能对比")
-                                metric_target = st.selectbox("选择要对比的指标",
-                                                             ["AUC", "Accuracy", "F1_Score", "Sensitivity",
-                                                              "Specificity"],
-                                                             key="metric_target")
-                                chart_type = st.selectbox("选择图表类型",
-                                                          ["柱状图 (Bar)", "森林图 (Forest)", "散点图 (Scatter)",
-                                                           "雷达图 (Radar)"],
-                                                          key="chart_type")
 
+                                # 选择数据集：训练集 或 验证集
+                                dataset_choice = st.radio(
+                                    "选择数据集",
+                                    options=["训练集 (Training)", "验证集 (Validation)"],
+                                    horizontal=True
+                                )
+
+                                # 根据选择获取对应的指标 DataFrame
+                                if dataset_choice == "训练集 (Training)":
+                                    metrics_df = df_train_metrics
+                                    dataset_label = "Training"
+                                else:
+                                    metrics_df = df_test_metrics
+                                    dataset_label = "Validation"
+
+                                # 选择要对比的指标
+                                metric_target = st.selectbox(
+                                    "选择要对比的指标",
+                                    ["AUC", "Accuracy", "F1_Score", "Sensitivity", "Specificity"],
+                                    key="metric_target"
+                                )
+
+                                # 选择图表类型
+                                chart_type = st.selectbox(
+                                    "选择图表类型",
+                                    ["柱状图 (Bar)", "森林图 (Forest)", "散点图 (Scatter)", "雷达图 (Radar)"],
+                                    key="chart_type"
+                                )
+
+                                fig = None
                                 if chart_type == "柱状图 (Bar)":
-                                    fig = plot_metric_bars(df_test_metrics, metric_target, "Validation", palette_choice)
+                                    fig = plot_metric_bars(metrics_df, metric_target, dataset_label, st.session_state.palette_choice)
                                 elif chart_type == "森林图 (Forest)":
-                                    fig = plot_forest_style(df_test_metrics, metric_target, "Validation",
-                                                            palette_choice)
+                                    fig = plot_forest_style(metrics_df, metric_target, dataset_label, st.session_state.palette_choice)
                                 elif chart_type == "散点图 (Scatter)":
-                                    x_metric = st.selectbox("X轴指标", ["AUC", "Accuracy", "F1_Score", "Sensitivity",
-                                                                        "Specificity"],
-                                                            key="x_metric")
-                                    y_metric = st.selectbox("Y轴指标", ["AUC", "Accuracy", "F1_Score", "Sensitivity",
-                                                                        "Specificity"],
-                                                            key="y_metric", index=1)
-                                    fig = plot_scatter_comparison(df_test_metrics, x_metric, y_metric, "Validation",
-                                                                  palette_choice)
+                                    x_metric = st.selectbox(
+                                        "X轴指标",
+                                        ["AUC", "Accuracy", "F1_Score", "Sensitivity", "Specificity"],
+                                        key="x_metric"
+                                    )
+                                    y_metric = st.selectbox(
+                                        "Y轴指标",
+                                        ["AUC", "Accuracy", "F1_Score", "Sensitivity", "Specificity"],
+                                        key="y_metric",
+                                        index=1
+                                    )
+                                    fig = plot_scatter_comparison(metrics_df, x_metric, y_metric, dataset_label,
+                                                                  st.session_state.palette_choice)
                                 elif chart_type == "雷达图 (Radar)":
-                                    radar_metrics = st.multiselect("选择雷达图指标",
-                                                                   ["AUC", "Accuracy", "F1_Score", "Sensitivity", "Specificity"],
-                                                                   default=["AUC", "Accuracy", "F1_Score", "Sensitivity", "Specificity"])
+                                    radar_metrics = st.multiselect(
+                                        "选择雷达图指标",
+                                        ["AUC", "Accuracy", "F1_Score", "Sensitivity", "Specificity"],
+                                        default=["AUC", "Accuracy", "F1_Score", "Sensitivity", "Specificity"]
+                                    )
                                     if len(radar_metrics) < 3:
                                         st.warning("请至少选择3个指标")
-                                        fig = None
                                     else:
-                                        fig = plot_radar_chart(df_test_metrics, radar_metrics, "Validation",
-                                                               palette_choice)
+                                        fig = plot_radar_chart(metrics_df, radar_metrics, dataset_label, st.session_state.palette_choice)
 
                                 if fig is not None:
                                     st.pyplot(fig)
-                                    store_figure(fig, f"{chart_type}_{metric_target}.pdf")
+                                    store_figure(fig, f"{chart_type}_{metric_target}_{dataset_label}.pdf")
 
                             # ---------- Tab: 混淆矩阵 ----------
                             with tab_cm:
-                                st.markdown("#### 验证集 (Validation Set) 混淆矩阵")
-                                fig_cm = plot_confusion_matrices(y_test, test_preds)
-                                st.pyplot(fig_cm)
-                                store_figure(fig_cm, "Confusion_Matrices.pdf")
-
+                                st.markdown("#### 混淆矩阵 (Confusion Matrices)")
+                                col_cm1, col_cm2 = st.columns(2)
+                                with col_cm1:
+                                    st.markdown("**训练集 (Training Set)**")
+                                    fig_cm_train = plot_confusion_matrices(
+                                        y_train, train_preds,
+                                        title_prefix="Train"
+                                    )
+                                    st.pyplot(fig_cm_train)
+                                    store_figure(fig_cm_train, "Confusion_Matrices_Train.pdf")
+                                with col_cm2:
+                                    st.markdown("**验证集 (Validation Set)**")
+                                    fig_cm_test = plot_confusion_matrices(
+                                        y_test, test_preds,
+                                        title_prefix="Validation"
+                                    )
+                                    st.pyplot(fig_cm_test)
+                                    store_figure(fig_cm_test, "Confusion_Matrices_Validation.pdf")
+                                    
                             # ---------- Tab: 详细表格 ----------
                             with tab_table:
                                 st.markdown("#### 训练集完整评价矩阵")
@@ -947,17 +963,17 @@ if mode == "主队列完整分析":
                             # 绘制ROC
                             ext_probs_dict = {"External Model": y_ext_prob}
                             fig_roc_ext = plot_multi_roc(y_ext_clean, ext_probs_dict, "External Validation",
-                                                         palette_choice)
+                                                         st.session_state.palette_choice)
                             st.pyplot(fig_roc_ext)
                             store_figure(fig_roc_ext, "External_ROC.pdf")
 
                             # 校准曲线
-                            fig_cal_ext = plot_calibration_curve(y_ext_clean, y_ext_prob, "External", palette_choice)
+                            fig_cal_ext = plot_calibration_curve(y_ext_clean, y_ext_prob, "External", st.session_state.palette_choice)
                             st.pyplot(fig_cal_ext)
                             store_figure(fig_cal_ext, "External_Calibration.pdf")
 
                             # 决策曲线
-                            fig_dca_ext = plot_decision_curve(y_ext_clean, y_ext_prob, "External", palette_choice)
+                            fig_dca_ext = plot_decision_curve(y_ext_clean, y_ext_prob, "External", st.session_state.palette_choice)
                             st.pyplot(fig_dca_ext)
                             store_figure(fig_dca_ext, "External_DecisionCurve.pdf")
 
